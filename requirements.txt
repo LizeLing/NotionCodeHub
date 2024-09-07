@@ -2,6 +2,5 @@ notion-client
 streamlit
 Pandas
 Matplotlib
-Beautiful Soup
 Pillow
 NLTK
