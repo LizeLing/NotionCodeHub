@@ -1,0 +1,355 @@
+
+
+--- app.py ---
+
+import streamlit as st
+import json
+from notion_manager import get_all_page_data, get_single_page_data
+from code_execution import execute_code, execute_web_code
+from utils import group_pages_by_category, initialize_session_state, get_sorted_categories, get_html_download_link
+
+def main():
+    st.set_page_config(
+        layout="wide", 
+        page_title="📝Notion Code Hub",
+        page_icon="https://upload.wikimedia.org/wikipedia/commons/4/45/Notion_app_logo.png"
+    )
+    
+    # Streamlit 컴포넌트의 기본 스타일을 제거하는 CSS
+    st.markdown("""
+        <style>
+        iframe {
+            border: none !important;
+            box-shadow: none !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    st.title("📝Notion Code Hub")
+    
+    st.info("노션 코드 허브에 오신것을 환영합니다! 🎉\n")
+
+    try:
+        if 'page_data' not in st.session_state:
+            st.session_state.page_data = get_all_page_data()
+
+        grouped_pages = group_pages_by_category(st.session_state.page_data)
+        sorted_categories = get_sorted_categories(grouped_pages)
+
+        st.sidebar.title("카테고리")
+
+        if not initialize_session_state(grouped_pages):
+            return
+
+        # 카테고리와 페이지 선택을 위한 UI
+        for category in sorted_categories:
+            with st.sidebar.expander(category):
+                for page in grouped_pages[category]:
+                    if st.button(f"{page['icon']} {page['title']}", key=f"btn_{page['id']}", use_container_width=True):
+                        st.session_state.selected_category = category
+                        st.session_state.selected_page = page['title']
+                        st.session_state.selected_page_data = get_single_page_data(page['id'])
+
+        # 선택된 페이지 내용 표시
+        if 'selected_page_data' in st.session_state and st.session_state.selected_page_data:
+            selected_page = st.session_state.selected_page_data
+            st.header(f"{selected_page['icon']} {selected_page['title']}")
+            
+            # 코드 실행 버튼 표시
+            if selected_page['codes']:
+                if selected_page['template'] in ['Web_Basic', 'HTML_Single_Page']:
+                    html_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'HTML'), '')
+                    css_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'CSS'), '')
+                    js_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'JavaScript'), '')
+                    json_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'JSON'), '')
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Run Code"):
+                            if selected_page['template'] == 'Web_Basic':
+                                integrated_html = execute_web_code(html_code, css_code, js_code, json_code)
+                            else:
+                                integrated_html = html_code
+                            scrollable_html = f'<div style="height: 600px; overflow-y: scroll;">{integrated_html}</div>'
+                            st.components.v1.html(scrollable_html, height=620)
+                    
+                    with col2:
+                        if st.button("Download HTML"):
+                            if selected_page['template'] == 'Web_Basic':
+                                download_html = execute_web_code(html_code, css_code, js_code, json_code)
+                            else:
+                                download_html = html_code
+                            st.markdown(get_html_download_link(download_html, f"{selected_page['title']}.html"), unsafe_allow_html=True)
+                
+                elif selected_page['template'] in ['Python', 'Data_Analysis']:
+                    python_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'Python'), None)
+                    json_code = next((code['content'] for code in selected_page['codes'] if code['type'] == 'JSON'), '')
+                    
+                    if python_code:
+                        if st.button("Run Python Code"):
+                            if json_code and json_code.strip():
+                                st.info("Executing Python code with JSON data.")
+
+                            output = execute_code(python_code, json_code)
+                            st.text_area("Execution Result:", value=output, height=400)
+                    
+                    if json_code:
+                        st.subheader("JSON Data")
+                        if json_code.strip():
+                            try:
+                                json.loads(json_code)  # JSON 유효성 검사
+                                st.json(json.loads(json_code))
+                            except json.JSONDecodeError:
+                                st.error("Error: Invalid JSON data. This may affect code execution.")
+                        else:
+                            st.info("JSON data is empty.")
+            else:
+                st.info(f"No executable code provided for this page (Template: {selected_page['template']}).")
+
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.error("Please check your Notion database and ensure it contains valid pages and code blocks.")
+
+if __name__ == "__main__":
+    main()
+
+--- code_execution.py ---
+
+import io
+import sys
+import json
+from contextlib import redirect_stdout
+import streamlit as st
+
+def execute_code(code, json_data):
+    """코드를 실행하고 출력을 반환합니다. JSON 데이터가 제공되면 이를 포함합니다."""
+    output = io.StringIO()
+    with redirect_stdout(output):
+        try:
+            if json_data and json_data.strip():
+                try:
+                    json_obj = json.loads(json_data)
+                    exec(f"data = {json.dumps(json_obj)}\n{code}")
+                except json.JSONDecodeError:
+                    print("Warning: Invalid JSON data. Executing code with empty JSON.")
+                    exec(f"data = {{}}\n{code}")
+            else:
+                print("Note: JSON data is empty. Executing code with empty JSON.")
+                exec(f"data = {{}}\n{code}")
+        except Exception as e:
+            print(f"Error executing code: {str(e)}")
+    result = output.getvalue()
+    return result
+
+def execute_web_code(html_code, css_code, js_code, json_code):
+    """HTML, CSS, JavaScript, JSON 코드를 통합하여 실행합니다."""
+    integrated_html = html_code
+    if css_code:
+        integrated_html = integrated_html.replace('</head>', f'<style>{css_code}</style></head>')
+    if js_code:
+        integrated_html = integrated_html.replace('</body>', f'<script>{js_code}</script></body>')
+    
+    # JSON 데이터 처리
+    if json_code and json_code.strip():
+        try:
+            json.loads(json_code)  # JSON 유효성 검사
+            integrated_html = integrated_html.replace('</body>', f'<script>var data = {json_code};</script></body>')
+        except json.JSONDecodeError:
+            st.warning("Invalid JSON data. Web page will include empty JSON data.")
+            integrated_html = integrated_html.replace('</body>', '<script>var data = {};</script></body>')
+    else:
+        st.info("JSON data is empty. Web page will include empty JSON data.")
+        integrated_html = integrated_html.replace('</body>', '<script>var data = {};</script></body>')
+    
+    return integrated_html
+
+--- merge.py ---
+
+import os
+
+def merge_files(directory, output_file, excluded_files):
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                if file.endswith('.py') and file not in excluded_files:
+                    file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(file_path, directory)
+                    outfile.write(f"\n\n--- {relative_path} ---\n\n")
+                    with open(file_path, 'r', encoding='utf-8') as infile:
+                        outfile.write(infile.read())
+
+def main():
+    # 현재 작업 디렉토리
+    current_directory = os.getcwd()
+    
+    # 출력 파일 이름
+    output_filename = 'projectfiles.txt'
+    
+    # 제외할 파일 목록을 여기에 정의합니다
+    excluded_files = [
+        'config.py',
+    ]
+    
+    # 파일 병합 실행
+    merge_files(current_directory, output_filename, excluded_files)
+    
+    print(f"파일 병합이 완료되었습니다. 결과 파일: {output_filename}")
+    print(f"현재 작업 디렉토리: {current_directory}")
+    print(f"제외된 파일들: {', '.join(excluded_files) if excluded_files else '없음'}")
+
+if __name__ == "__main__":
+    main()
+
+--- notion_manager.py ---
+
+from notion_client import Client
+import streamlit as st
+
+NOTION_TOKEN = st.secrets.API_KEY.NOTION_TOKEN
+DATABASE_ID = st.secrets.API_KEY.NOTION_DATABASE_ID
+
+notion = Client(auth=NOTION_TOKEN)
+
+TEMPLATES = {
+    "Python": ["Python", "JSON"],
+    "Web_Basic": ["HTML", "CSS", "JavaScript", "JSON"],
+    "Data_Analysis": ["Python", "JSON"],
+    "HTML_Single_Page": ["HTML"]
+}
+
+def fetch_pages():
+    """Notion 데이터베이스에서 페이지를 가져옵니다."""
+    try:
+        response = notion.databases.query(
+            database_id=DATABASE_ID,
+            sorts=[{"property": "title", "direction": "ascending"}]
+        )
+        return response['results']
+    except Exception as e:
+        st.error(f"Error fetching pages from Notion: {str(e)}")
+        raise
+
+def extract_page_content(page_id):
+    """Notion 페이지의 내용을 가져옵니다."""
+    try:
+        response = notion.blocks.children.list(block_id=page_id)
+        return response['results']
+    except Exception as e:
+        st.error(f"Error extracting content for page ID {page_id}: {str(e)}")
+        raise
+
+def extract_code_blocks(content, template):
+    """페이지 내용에서 코드 블록을 추출합니다."""
+    code_blocks = []
+    expected_types = TEMPLATES[template]
+    current_type_index = 0
+
+    for block in content:
+        if block['type'] == 'code' and current_type_index < len(expected_types):
+            code_type = expected_types[current_type_index]
+            code_content = block['code']['rich_text'][0]['plain_text'] if block['code']['rich_text'] else ""
+            code_blocks.append({
+                'type': code_type,
+                'content': code_content
+            })
+            current_type_index += 1
+    
+    return code_blocks
+
+def get_page_icon(page):
+    """페이지의 아이콘을 가져옵니다."""
+    icon = page.get('icon')
+    if icon:
+        if icon['type'] == 'emoji':
+            return icon['emoji']
+        elif icon['type'] == 'external':
+            return icon['external']['url']
+        elif icon['type'] == 'file':
+            return icon['file']['url']
+    return '📄'  # 기본 아이콘
+
+def get_all_page_data():
+    """모든 페이지 데이터를 가져와 처리합니다."""
+    pages = fetch_pages()
+    page_data = []
+    for page in pages:
+        properties = page['properties']
+        template = properties['template']['select']['name']
+        
+        if template not in TEMPLATES:
+            continue
+
+        page_data.append({
+            'id': page['id'],
+            'category': properties['category']['select']['name'],
+            'title': properties['title']['title'][0]['plain_text'],
+            'template': template,
+            'icon': get_page_icon(page)
+        })
+    
+    return page_data
+
+def get_single_page_data(page_id):
+    """단일 페이지의 데이터를 가져와 처리합니다."""
+    page = notion.pages.retrieve(page_id=page_id)
+    properties = page['properties']
+    template = properties['template']['select']['name']
+    
+    if template not in TEMPLATES:
+        return None
+
+    content = extract_page_content(page_id)
+    codes = extract_code_blocks(content, template)
+    
+    return {
+        'id': page['id'],
+        'category': properties['category']['select']['name'],
+        'title': properties['title']['title'][0]['plain_text'],
+        'template': template,
+        'icon': get_page_icon(page),
+        'codes': codes
+    }
+
+--- utils.py ---
+
+import streamlit as st
+import base64
+
+def group_pages_by_category(page_data):
+    """페이지를 카테고리별로 그룹화합니다."""
+    grouped_pages = {}
+    for page in page_data:
+        if page['category'] not in grouped_pages:
+            grouped_pages[page['category']] = []
+        grouped_pages[page['category']].append(page)
+    return grouped_pages
+
+def get_sorted_categories(grouped_pages):
+    """카테고리를 알파벳 순서로 정렬하여 반환합니다."""
+    return sorted(grouped_pages.keys())
+
+def initialize_session_state(grouped_pages):
+    """세션 상태를 초기화합니다."""
+    sorted_categories = get_sorted_categories(grouped_pages)
+    
+    if not grouped_pages:
+        st.error("No pages found in the database. Please check your Notion setup.")
+        return False
+
+    if 'selected_category' not in st.session_state or st.session_state.selected_category not in grouped_pages:
+        st.session_state.selected_category = sorted_categories[0]
+    
+    if 'selected_page' not in st.session_state or not grouped_pages[st.session_state.selected_category]:
+        if grouped_pages[st.session_state.selected_category]:
+            st.session_state.selected_page = grouped_pages[st.session_state.selected_category][0]['title']
+        else:
+            st.error(f"No pages found in the category: {st.session_state.selected_category}")
+            return False
+
+    return True
+
+def get_html_download_link(html_string, filename="download.html"):
+    """HTML 문자열을 다운로드 가능한 링크로 변환합니다."""
+    b64 = base64.b64encode(html_string.encode()).decode()
+    href = f'<a href="data:text/html;base64,{b64}" download="{filename}">Download HTML file</a>'
+    return href
